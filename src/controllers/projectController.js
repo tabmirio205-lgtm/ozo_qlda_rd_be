@@ -15,8 +15,53 @@ const {
       seedFromJsonFile,
       seedFromPayload,
 } = require("../services/projectService");
-const { findMemberByName } = require("../services/picMembersService");
+const {
+      findMemberByName,
+      getMemberByEmail,
+} = require("../services/picMembersService");
 const { toPicArray } = require("../utils/pic");
+
+// === Ẩn ghi chú & đính kèm của nhánh B (B. Nghiên cứu bào chế) ===
+// Yêu cầu: chỉ phòng PP và RD (và Quản lý) mới xem được Ghi chú / Đính kèm của
+// các bước nhánh B ở MỌI dự án. Người khác -> backend xoá 2 trường này khỏi
+// response (ẩn thật, không chỉ ẩn trên giao diện).
+const STAGE_B_PRIVATE_DEPTS = new Set(["PP", "RD"]);
+
+// Tập mã phòng của người đang xem: gộp phòng mình quản lý (leadDepts trong token)
+// + phòng ghi trong pic_members (token không mang sẵn 'phòng' của người xem).
+async function viewerDepts(user) {
+      const depts = new Set();
+      for (const d of user?.leadDepts || []) {
+            const t = String(d || "").trim().toUpperCase();
+            if (t) depts.add(t);
+      }
+      let member = null;
+      if (user?.email) member = await getMemberByEmail(user.email);
+      if (!member && user?.picName) member = await findMemberByName(user.picName);
+      const md = (member?.dept || "").trim().toUpperCase();
+      if (md) depts.add(md);
+      return depts;
+}
+
+// Người xem có được thấy Ghi chú/Đính kèm nhánh B không? Quản lý: luôn được.
+async function canSeeStageBPrivate(user) {
+      if (user?.role === "manager") return true;
+      const depts = await viewerDepts(user);
+      for (const d of STAGE_B_PRIVATE_DEPTS) if (depts.has(d)) return true;
+      return false;
+}
+
+// Xoá notes & attachments khỏi các bước nhánh B (node_id bắt đầu bằng 'B').
+// Mutate tại chỗ trên object { project, nodes }.
+function stripStageBPrivate(detail) {
+      if (!detail || !Array.isArray(detail.nodes)) return detail;
+      detail.nodes = detail.nodes.map((n) =>
+            String(n.node_id || "").trim().toUpperCase().startsWith("B")
+                  ? { ...n, notes: "", attachments: [] }
+                  : n,
+      );
+      return detail;
+}
 const { todayIsoVN } = require("../utils/datePlanner");
 const {
       notifyAssignment,
@@ -36,11 +81,15 @@ async function getProjects(req, res) {
 async function getProjectById(req, res) {
       const projectId = Number(req.params.projectId);
       const data = await getProjectDetail(projectId);
+      if (!(await canSeeStageBPrivate(req.user))) stripStageBPrivate(data);
       res.json(data);
 }
 
 async function getProjectsWithNodes(req, res) {
       const data = await listProjectsWithNodes();
+      if (!(await canSeeStageBPrivate(req.user))) {
+            for (const d of data) stripStageBPrivate(d);
+      }
       res.json(data);
 }
 
