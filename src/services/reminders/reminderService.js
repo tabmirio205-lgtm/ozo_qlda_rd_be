@@ -15,7 +15,7 @@ const { getSupabaseClient } = require('../../config/supabaseClient');
 const { computeAllDates, isoLocal } = require('../../utils/datePlanner');
 const { sendTextByEmail, sendTextByOpenId, isLarkConfigured } = require('../lark/larkClient');
 const { remindersEnabled, stepDoneWatcherOpenIds, appUrl } = require('../../config/env');
-const { getDeptLeaderMap, isLeaderLabel, deptFromLeaderLabel } = require('../picMembersService');
+const { getDeptLeaderMap, isLeaderLabel, deptFromLeaderLabel, leaderLabel } = require('../picMembersService');
 const { toPicArray, picText } = require('../../utils/pic');
 
 const TZ = 'Asia/Ho_Chi_Minh';
@@ -113,9 +113,15 @@ async function computeReminderItems() {
   for (const { project, nodes } of projects) {
     const dates = computeAllDates({ project, nodes });
     for (const node of nodes) {
-      const pics = toPicArray(node.pic);
-      if (!pics.length) continue;
       if (SILENT.has(node.status)) continue;
+      let pics = toPicArray(node.pic);
+      // Bước CHƯA PHÂN CÔNG (không có PIC) mà có phòng -> coi như giao cho TRƯỞNG
+      // PHÒNG phòng đó, để trưởng phòng được nhắc hạn và phân người.
+      if (!pics.length) {
+        const dept = (node.dept || '').trim();
+        if (dept) pics = [leaderLabel(dept)];
+      }
+      if (!pics.length) continue;
 
       const due = dates[node.node_id]?.due;
       if (!due) continue;
@@ -131,7 +137,9 @@ async function computeReminderItems() {
       // Nhiều PIC/1 bước -> mỗi người 1 item riêng. dedup_key kèm norm(pic) để
       // mỗi người được nhắc độc lập (không đè nhau ở bảng sent_reminders).
       for (const pic of pics) {
-        const base = { project, node, pic, dueLabel };
+        // Nhãn "Trưởng phòng X" trên bước = chưa phân cho người cụ thể.
+        const unassigned = isLeaderLabel(pic);
+        const base = { project, node, pic, dueLabel, unassigned };
 
         // Việc mới giao (assigned) KHÔNG quét ở đây nữa — đã chuyển sang gửi ngay
         // khi phân PIC qua notifyAssignment(). Vòng quét chỉ lo due_soon/overdue.
@@ -202,8 +210,9 @@ function composeMessage(list) {
 
   // Mọi dòng đều kèm TÊN dự án để PIC biết ngay việc thuộc dự án nào, và ngay
   // dưới là link mở thẳng dự án đó.
+  const unassignedTag = (it) => (it.unassigned ? ' — ⚠️ CHƯA PHÂN CÔNG' : '');
   const line = (it) =>
-    `• [${it.project.code}] ${it.project.name || ''} – ${it.node.node_id} ${it.node.node_name || ''} (hạn ${it.dueLabel})`;
+    `• [${it.project.code}] ${it.project.name || ''} – ${it.node.node_id} ${it.node.node_name || ''} (hạn ${it.dueLabel})${unassignedTag(it)}`;
   const out = ['📋 Nhắc việc – Feelex QLDA', ''];
   const pushStep = (text, it) => {
     out.push(text);
@@ -224,7 +233,7 @@ function composeMessage(list) {
     out.push('⚠️ Việc quá hạn:');
     byKind.overdue.forEach((it) =>
       pushStep(
-        `• [${it.project.code}] ${it.project.name || ''} – ${it.node.node_id} ${it.node.node_name || ''} (quá hạn ${it.lateDays} ngày, hạn ${it.dueLabel})`,
+        `• [${it.project.code}] ${it.project.name || ''} – ${it.node.node_id} ${it.node.node_name || ''} (quá hạn ${it.lateDays} ngày, hạn ${it.dueLabel})${unassignedTag(it)}`,
         it,
       ),
     );
@@ -251,6 +260,7 @@ async function sendToContact(contact, text) {
 //   dryRun=true -> chỉ tính & trả nội dung, KHÔNG gửi, KHÔNG ghi DB.
 async function runReminders({ dryRun = false } = {}) {
   const contactMap = await loadPicContactMap();
+  const leaderMap = await loadLeaderContactMap(contactMap);
   const { items } = await computeReminderItems();
 
   let remaining = items;
@@ -270,7 +280,8 @@ async function runReminders({ dryRun = false } = {}) {
 
   // Gắn liên hệ (open_id/email) cho từng item; tách nhóm gửi được / không liên hệ.
   for (const it of remaining) {
-    it.contact = contactMap.get(norm(it.pic)) || null;
+    // Nhãn "Trưởng phòng X" (bước chưa phân công) -> quy về trưởng phòng thật.
+    it.contact = resolveAssignContact(it.pic, contactMap, leaderMap);
     it.email = it.contact?.email || null; // để recordSent lưu lại
   }
   const sendable = remaining.filter((it) => it.contact && (it.contact.open_id || it.contact.email));
