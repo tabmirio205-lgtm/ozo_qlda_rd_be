@@ -255,31 +255,10 @@ async function patchProjectNode(req, res) {
                   for (const f of LOCK_AFTER_DONE) delete payload[f];
             }
 
-            // PIC-chủ-bước (không phải trưởng phòng) muốn ĐỔI danh sách PIC -> mọi
-            // người MỚI phải CÙNG PHÒNG với bước (người đã có sẵn thì giữ nguyên).
-            if (payload.pic !== undefined && !isLeaderOfDept) {
-                  const cleaned = [];
-                  for (const name of payload.pic) {
-                        if (owners.includes(name)) {
-                              cleaned.push(name);
-                              continue;
-                        }
-                        const target = await findMemberByName(name);
-                        if (!target) {
-                              return res.status(400).json({
-                                    error: `Không tìm thấy PIC "${name}" trong danh bạ.`,
-                              });
-                        }
-                        const targetDept = (target.dept || "").trim();
-                        if (!nodeDept || targetDept !== nodeDept) {
-                              return res.status(403).json({
-                                    error: `Chỉ được thêm PIC cùng phòng ${nodeDept || "—"}. "${target.pic_name}" thuộc phòng ${targetDept || "—"}.`,
-                              });
-                        }
-                        cleaned.push(target.pic_name); // chuẩn hoá tên theo danh bạ
-                  }
-                  payload.pic = cleaned;
-            }
+            // PHÂN CÔNG PIC: chỉ Quản lý & TRƯỞNG PHÒNG của bước mới được phân/đổi
+            // người phụ trách. PIC thường (kể cả chủ bước) KHÔNG tự đổi PIC được —
+            // bỏ 'pic' khỏi payload để các sửa khác (ghi chú/trạng thái) vẫn chạy.
+            if (!isLeaderOfDept) delete payload.pic;
       }
 
       // Chuẩn hoá từng tên PIC về đúng danh bạ (vd "Ly" -> "Phạm Khánh Ly") để
