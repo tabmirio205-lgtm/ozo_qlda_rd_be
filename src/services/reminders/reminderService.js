@@ -29,6 +29,13 @@ function norm(s) {
   return String(s || '').trim().toLowerCase();
 }
 
+// Dự án Pending -> KHÔNG nhắc việc (deadline lẫn các thông báo theo sự kiện).
+// Dự án chưa có status (DB cũ) coi như 'Đang hoạt động'.
+function isActiveProject(project) {
+  const s = (project && project.status ? String(project.status) : '').trim() || 'Đang hoạt động';
+  return s !== 'Pending';
+}
+
 // Ngày hôm nay theo giờ VN, kèm mốc UTC-midnight để trừ ngày an toàn.
 function vnToday() {
   const iso = new Intl.DateTimeFormat('en-CA', {
@@ -111,6 +118,7 @@ async function computeReminderItems() {
   const items = [];
 
   for (const { project, nodes } of projects) {
+    if (!isActiveProject(project)) continue; // bỏ dự án Pending
     const dates = computeAllDates({ project, nodes });
     for (const node of nodes) {
       if (SILENT.has(node.status)) continue;
@@ -348,6 +356,7 @@ async function notifyAssignment(projectId, nodeId) {
   }
 
   const { project, nodes } = await getProjectDetail(projectId);
+  if (!isActiveProject(project)) return { ok: false, reason: 'project_pending' };
   const node = (nodes || []).find((n) => n.node_id === nodeId);
   if (!node) return { ok: false, reason: 'not_found' };
   const pics = toPicArray(node.pic);
@@ -408,6 +417,7 @@ async function notifyNewProjectAssignments(projectId) {
   if (!remindersEnabled || !isLarkConfigured) return { ok: false, reason: 'disabled' };
 
   const { project, nodes } = await getProjectDetail(projectId);
+  if (!isActiveProject(project)) return { ok: true, sent: 0, note: 'project_pending' };
   const contactMap = await loadPicContactMap();
   const leaderMap = await loadLeaderContactMap(contactMap);
   const dates = computeAllDates({ project, nodes });
@@ -491,6 +501,7 @@ async function notifyStepsStarted(projectId, startedNodeIds) {
   if (!ids.length) return { ok: false, reason: 'no_nodes' };
 
   const { project, nodes } = await getProjectDetail(projectId);
+  if (!isActiveProject(project)) return { ok: true, sent: 0, note: 'project_pending' };
   const contactMap = await loadPicContactMap();
   const leaderMap = await loadLeaderContactMap(contactMap);
   const dates = computeAllDates({ project, nodes });
@@ -612,6 +623,7 @@ async function notifyDueDateChanges(projectId, before) {
   if (!before || !Object.keys(before).length) return { ok: false, reason: 'no_snapshot' };
 
   const { project, nodes } = await getProjectDetail(projectId);
+  if (!isActiveProject(project)) return { ok: true, sent: 0, note: 'project_pending' };
   const dates = computeAllDates({ project, nodes });
   const contactMap = await loadPicContactMap();
   const leaderMap = await loadLeaderContactMap(contactMap);
@@ -699,6 +711,7 @@ async function notifyStepCompleted(projectId, nodeId, statusLabel) {
   if (!remindersEnabled || !isLarkConfigured) return { ok: false, reason: 'disabled' };
 
   const { project, nodes } = await getProjectDetail(projectId);
+  if (!isActiveProject(project)) return { ok: false, reason: 'project_pending' };
   const node = (nodes || []).find((n) => n.node_id === nodeId);
   if (!node) return { ok: false, reason: 'not_found' };
 
