@@ -482,7 +482,7 @@ async function upsertProjectFromJsonRow(projectJson) {
       project_id: project.id,
       node_id: nodeId,
       name: nodeData.name || nodeMeta?.name || nodeId,
-      status: nodeData.status || 'Chua lam',
+      status: nodeData.status || 'Chưa làm',
       pic: toPicArray(nodeData.pic),
       duration:
         typeof nodeData.duration === 'number'

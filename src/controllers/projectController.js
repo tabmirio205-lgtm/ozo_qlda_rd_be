@@ -132,6 +132,11 @@ async function copyProjectController(req, res) {
       }
       try {
             const created = await copyProject(sourceId, { code, name });
+            // Nhân bản cũng là PHÂN CÔNG: báo "việc mới được giao" cho từng PIC của
+            // dự án vừa copy (giống tạo mới). Trước đây copy không báo -> PIC bị bỏ sót.
+            notifyNewProjectAssignments(created.id).catch((e) =>
+                  console.error("[copy-project-notify] lỗi:", e.message),
+            );
             return res.status(201).json(created);
       } catch (e) {
             if (/duplicate|unique/i.test(e.message || "")) {

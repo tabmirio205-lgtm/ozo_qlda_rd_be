@@ -29,11 +29,12 @@ function norm(s) {
   return String(s || '').trim().toLowerCase();
 }
 
-// Dự án Pending -> KHÔNG nhắc việc (deadline lẫn các thông báo theo sự kiện).
+// CHỈ dự án 'Đang hoạt động' mới nhắc việc (deadline lẫn thông báo sự kiện).
+// Pending & Hoàn tất -> im lặng (đồng bộ với báo cáo nhóm ở reportService).
 // Dự án chưa có status (DB cũ) coi như 'Đang hoạt động'.
 function isActiveProject(project) {
   const s = (project && project.status ? String(project.status) : '').trim() || 'Đang hoạt động';
-  return s !== 'Pending';
+  return s === 'Đang hoạt động';
 }
 
 // Ngày hôm nay theo giờ VN, kèm mốc UTC-midnight để trừ ngày an toàn.
@@ -152,8 +153,10 @@ async function computeReminderItems() {
         // Việc mới giao (assigned) KHÔNG quét ở đây nữa — đã chuyển sang gửi ngay
         // khi phân PIC qua notifyAssignment(). Vòng quét chỉ lo due_soon/overdue.
 
-        // Trước hạn ~24h: hạn rơi đúng vào ngày mai.
-        if (diffDays === 1) {
+        // Sắp đến hạn: còn 1 ngày (ngày mai) HOẶC đến hạn hôm nay. dedup_key theo
+        // ngày hạn nên D-1 và D-0 dùng chung khoá -> không gửi trùng; nhưng nếu
+        // lỡ ngày D-1 (server down) thì ngày đến hạn vẫn còn kịp 1 lần nhắc.
+        if (diffDays === 0 || diffDays === 1) {
           items.push({ ...base, kind: 'due_soon', dedup_key: `${dueIso}|${norm(pic)}` });
         }
 
@@ -167,18 +170,28 @@ async function computeReminderItems() {
   return { items, today };
 }
 
-// Bỏ các item đã gửi rồi (đọc toàn bộ sent_reminders — bảng nhỏ theo quy mô đội).
+// Bỏ các item đã gửi rồi. PHẢI phân trang: PostgREST trả tối đa 1000 dòng/lần,
+// mà sent_reminders tích luỹ > 1000 dòng -> nếu đọc 1 phát sẽ BỎ SÓT các dấu đã
+// gửi (nằm ngoài 1000) khiến DEDUP HỎNG -> gửi trùng tin. (Bug trần 1000 dòng.)
 async function filterUnsent(items) {
   const supabase = getSupabaseClient();
-  const { data, error } = await supabase
-    .from('sent_reminders')
-    .select('project_id,node_id,kind,dedup_key');
-  if (error) {
-    const e = new Error(
-      'Không đọc được bảng sent_reminders (đã chạy sql/reminders.sql chưa?): ' + error.message,
-    );
-    e.code = 'NO_TABLE';
-    throw e;
+  const PAGE = 1000;
+  const data = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data: page, error } = await supabase
+      .from('sent_reminders')
+      .select('project_id,node_id,kind,dedup_key')
+      .range(from, from + PAGE - 1);
+    if (error) {
+      const e = new Error(
+        'Không đọc được bảng sent_reminders (đã chạy sql/reminders.sql chưa?): ' + error.message,
+      );
+      e.code = 'NO_TABLE';
+      throw e;
+    }
+    if (!page || page.length === 0) break;
+    data.push(...page);
+    if (page.length < PAGE) break;
   }
   const seen = new Set(
     (data || []).map((r) => `${r.project_id}|${r.node_id}|${r.kind}|${r.dedup_key}`),
@@ -292,23 +305,19 @@ async function runReminders({ dryRun = false } = {}) {
     it.contact = resolveAssignContact(it.pic, contactMap, leaderMap);
     it.email = it.contact?.email || null; // để recordSent lưu lại
   }
-  const sendable = remaining.filter((it) => it.contact && (it.contact.open_id || it.contact.email));
+  let sendable = remaining.filter((it) => it.contact && (it.contact.open_id || it.contact.email));
   const noContact = remaining.filter((it) => !(it.contact && (it.contact.open_id || it.contact.email)));
   const missingPics = [...new Set(noContact.map((it) => it.pic))];
 
-  // Lần chạy ĐẦU TIÊN (bảng rỗng): ghi nhận hiện trạng, KHÔNG gửi để tránh spam
-  // hàng loạt việc cũ. Từ lần sau chỉ những thay đổi mới mới được gửi.
+  // Lần chạy ĐẦU TIÊN (bảng rỗng): chỉ GHI NHẬN (không gửi) các việc QUÁ HẠN cũ
+  // để tránh spam hàng loạt việc tồn đọng. Nhưng việc SẮP ĐẾN HẠN (due_soon) VẪN
+  // GỬI bình thường — đó là tin tương lai hữu ích, không phải spam quá khứ.
+  let firstRunBackfilled = 0;
   if (firstRun && !dryRun) {
-    await recordSent(sendable);
-    return {
-      ok: true,
-      firstRun: true,
-      backfilled: sendable.length,
-      sent: 0,
-      noContactItems: noContact.length,
-      missingPics,
-      note: 'Lần đầu: đã ghi nhận hiện trạng, chưa gửi tin nào.',
-    };
+    const overdueOld = sendable.filter((it) => it.kind === 'overdue');
+    if (overdueOld.length) await recordSent(overdueOld);
+    firstRunBackfilled = overdueOld.length;
+    sendable = sendable.filter((it) => it.kind !== 'overdue');
   }
 
   // Gộp theo người (khóa = open_id || email) -> 1 tin/người.
@@ -337,6 +346,8 @@ async function runReminders({ dryRun = false } = {}) {
   return {
     ok: true,
     dryRun,
+    firstRun: firstRun || undefined,
+    firstRunBackfilled: firstRunBackfilled || undefined,
     people: byPerson.size,
     sent: dryRun ? 0 : sentItems.length,
     noContactItems: noContact.length,
@@ -363,17 +374,48 @@ async function notifyAssignment(projectId, nodeId) {
   if (!pics.length) return { ok: false, reason: 'no_pic' };
   if (SILENT.has(node.status)) return { ok: false, reason: 'silent_status' };
 
-  // Mỗi PIC (có liên hệ, không phải nhãn vai trò/người ngoài danh bạ) -> 1 tin.
+  // Mỗi PIC -> 1 tin. Quy nhãn "Trưởng phòng X" về trưởng phòng thật (nhất quán
+  // với notifyNewProjectAssignments), không chỉ người có tên trong danh bạ.
   const contactMap = await loadPicContactMap();
+  const leaderMap = await loadLeaderContactMap(contactMap);
   const dates = computeAllDates({ project, nodes });
   const due = dates[node.node_id]?.due;
   const dueLabel = due
     ? fmtDMY(due.getFullYear(), due.getMonth() + 1, due.getDate())
     : '—';
 
+  // PHÂN-CÔNG-LẠI: xoá dấu 'assigned' của những PIC KHÔNG còn trong danh sách
+  // hiện tại của bước, để nếu sau này giao lại cho họ thì vẫn nhận tin (trước đây
+  // dedup theo norm(pic) không bao giờ dọn -> giao-lại-người-cũ bị chặn vĩnh viễn).
+  // Chỉ xoá ĐÚNG các key cũ (đọc trước rồi dùng .in(mảng)) để KHÔNG đụng key hiện tại.
+  try {
+    const keep = new Set(pics.map((p) => norm(p)));
+    const supabase = getSupabaseClient();
+    const { data: existing } = await supabase
+      .from('sent_reminders')
+      .select('dedup_key')
+      .eq('project_id', projectId)
+      .eq('node_id', nodeId)
+      .eq('kind', 'assigned');
+    const stale = [
+      ...new Set((existing || []).map((r) => r.dedup_key).filter((k) => !keep.has(k))),
+    ];
+    if (stale.length) {
+      await supabase
+        .from('sent_reminders')
+        .delete()
+        .eq('project_id', projectId)
+        .eq('node_id', nodeId)
+        .eq('kind', 'assigned')
+        .in('dedup_key', stale);
+    }
+  } catch (_e) {
+    // Không chặn luồng gửi nếu dọn dấu lỗi (vd bảng chưa có).
+  }
+
   const items = [];
   for (const pic of pics) {
-    const contact = contactMap.get(norm(pic));
+    const contact = resolveAssignContact(pic, contactMap, leaderMap);
     if (!contact || (!contact.open_id && !contact.email)) continue;
     items.push({
       project, node, pic, dueLabel, kind: 'assigned', dedup_key: norm(pic),

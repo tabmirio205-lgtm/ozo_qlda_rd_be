@@ -34,8 +34,9 @@ async function tick() {
   try {
     const h = vnHour();
 
-    // 1) Báo cáo tiến độ vào nhóm Lark — mỗi ngày 1 lần lúc 9h sáng.
-    if (h === REPORT_HOUR) {
+    // 1) Báo cáo tiến độ vào nhóm Lark — mỗi ngày 1 lần, từ 9h (có cửa sổ chạy bù
+    //    tới 17h nếu server down/khởi động muộn đúng giờ 9). Khoá theo NGÀY.
+    if (h >= REPORT_HOUR && h <= END_HOUR) {
       const dk = vnDateKey();
       if (dk !== lastReportKey) {
         lastReportKey = dk;
