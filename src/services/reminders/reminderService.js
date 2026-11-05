@@ -570,7 +570,9 @@ async function notifyStepsStarted(projectId, startedNodeIds) {
     for (const [key, contact] of recipByKey) {
       items.push({
         project, node, pic: picText(node.pic),
-        dueLabel, kind: 'started', dedup_key: norm(key),
+        // dedup KÈM ngày mở khoá: bước bị mở lại rồi mở khoá lại (sau khi bước
+        // trước được làm lại) vẫn báo được, không bị bản ghi cũ chặn vĩnh viễn.
+        dueLabel, kind: 'started', dedup_key: `${vnToday().iso}|${norm(key)}`,
         contact, email: contact.email || null,
       });
     }
@@ -780,10 +782,14 @@ async function notifyStepCompleted(projectId, nodeId, statusLabel) {
 
   if (!recipients.length) return { ok: false, reason: 'no_recipient', dept };
 
+  // dedup_key KÈM lần hoàn thành (ngày thực tế, hoặc trạng thái nếu Bỏ qua không
+  // có ngày). Nếu CHỈ khoá theo người nhận thì bước bị MỞ LẠI rồi XONG LẠI sẽ bị
+  // chặn vĩnh viễn -> không báo được lần hoàn thành mới (lỗi đã gặp ở DA22/G3).
+  const occ = (node.actual_date || statusLabel || 'done');
   const items = recipients.map((contact) => ({
     project, node, pic: picText(node.pic),
     dueLabel: '—', kind: 'completed',
-    dedup_key: norm(contact.open_id || contact.email),
+    dedup_key: `${occ}|${norm(contact.open_id || contact.email)}`,
     contact, email: contact.email || null,
   }));
 
